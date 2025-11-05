@@ -288,10 +288,3 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 });
-
-
-function clickSaveMSignDelayed(ms = 500) {
-	return setTimeout(() => {
-		document.querySelector('.save_msign_output')?.click();
-	}, ms);
-}
