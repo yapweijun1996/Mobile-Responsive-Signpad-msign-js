@@ -1,19 +1,94 @@
-
 /**
- * msign.js v3.9-ios
- * - iPhone-safe fullscreen modal: uses JS-driven --msign-vh for true viewport height
- * - Grid layout (header / canvas / footer) so footer never disappears
- * - Safe-area insets handled (env(safe-area-inset-*))
- * - Pointer Events; HiDPI canvas; auto preview; data-* controls; namespaced buttons
+ * msign.js v4.0
+ * - Zoom Lock: temporarily disables page zoom (pinch/double-tap/focus zoom) while modal is open, then restores it.
+ * - iPhone safe: real viewport measurement + grid layout keeps footer visible.
+ * - Pointer Events; HiDPI canvas; auto preview; data-* controls; hardened buttons.
  */
 document.addEventListener('DOMContentLoaded', () => {
-  /* ===== Config: pen width ===== */
+  /* ===== Config ===== */
   const MSIGN_PEN = { defaultWidth: 2, min: 1, max: 10 };
+  let   MSIGN_ZOOM_LOCK = true; // global default (can override per .msign via data-zoom-lock="false")
+
   const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
   let currentPenWidth = clamp(MSIGN_PEN.defaultWidth, MSIGN_PEN.min, MSIGN_PEN.max);
   function setPenWidth(px){ currentPenWidth = clamp(Number(px)||MSIGN_PEN.defaultWidth, MSIGN_PEN.min, MSIGN_PEN.max); if (ctx) ctx.lineWidth = currentPenWidth; }
   window.msignSetLineWidth = setPenWidth;
   window.msignConfig = MSIGN_PEN;
+
+  /* ===== Viewport zoom lock helpers ===== */
+  let viewportMetaOriginal = null;
+  let viewportMetaEl = null;
+  let viewportMetaWasCreated = false;
+  let zoomLockActive = false;
+  let lastTouchEndTime = 0;
+
+  function getViewportMeta(){
+    return document.querySelector('meta[name="viewport"]');
+  }
+  function lockZoom(){
+    if (zoomLockActive) return;
+    viewportMetaEl = getViewportMeta();
+    if (viewportMetaEl){
+      viewportMetaOriginal = viewportMetaEl.getAttribute('content') || '';
+      viewportMetaEl.setAttribute('content', buildLockContent(viewportMetaOriginal));
+    } else {
+      viewportMetaEl = document.createElement('meta');
+      viewportMetaEl.setAttribute('name','viewport');
+      viewportMetaEl.setAttribute('content','width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
+      document.head.appendChild(viewportMetaEl);
+      viewportMetaWasCreated = true;
+    }
+    // Prevent pinch zoom (iOS fires gesturestart)
+    document.addEventListener('gesturestart', preventDefaultPassive, { passive:false });
+    // Prevent double-tap zoom
+    document.addEventListener('touchend', handleDoubleTap, { passive:false });
+    zoomLockActive = true;
+  }
+  function unlockZoom(){
+    if (!zoomLockActive) return;
+    // restore viewport meta
+    if (viewportMetaEl){
+      if (viewportMetaWasCreated){
+        viewportMetaEl.remove();
+      } else {
+        viewportMetaEl.setAttribute('content', viewportMetaOriginal || 'width=device-width, initial-scale=1');
+      }
+    }
+    document.removeEventListener('gesturestart', preventDefaultPassive, { passive:false });
+    document.removeEventListener('touchend', handleDoubleTap, { passive:false });
+    viewportMetaOriginal = null;
+    viewportMetaEl = null;
+    viewportMetaWasCreated = false;
+    zoomLockActive = false;
+  }
+  function buildLockContent(prev){
+    // Keep width & initial-scale if present; force max-scale=1 and user-scalable=no
+    // This tries to respect your existing content string format.
+    const base = prev && prev.trim() ? prev : 'width=device-width, initial-scale=1';
+    const parts = base.split(',').map(s => s.trim()).filter(Boolean);
+    const map = {};
+    parts.forEach(p => {
+      const [k,v] = p.split('=');
+      map[k.trim()] = (v || '').trim();
+    });
+    map['maximum-scale'] = '1';
+    map['user-scalable'] = 'no';
+    // Remove duplicates and rebuild
+    const ordered = ['width','initial-scale','maximum-scale','minimum-scale','user-scalable'];
+    const out = [];
+    ordered.forEach(k => { if (map[k] !== undefined && map[k] !== '') out.push(`${k}=${map[k]}`); });
+    // keep any custom keys
+    Object.keys(map).forEach(k => { if (!ordered.includes(k)) out.push(`${k}=${map[k]}`); });
+    return out.join(', ');
+  }
+  function preventDefaultPassive(e){ e.preventDefault(); }
+  function handleDoubleTap(e){
+    const now = Date.now();
+    if (now - lastTouchEndTime < 300) { // within double-tap window
+      e.preventDefault();
+    }
+    lastTouchEndTime = now;
+  }
 
   /* ===== Overlay DOM & Styles ===== */
   const modalHTML = `
@@ -33,13 +108,13 @@ document.addEventListener('DOMContentLoaded', () => {
     </div>
   `;
   const modalStyle = `
-    :root{ --msign-vh: 100; } /* will be set in JS to real CSS px height */
+    :root{ --msign-vh: 100; } /* will be set to real viewport px via JS */
 
     /* ===== Field (thumbnail) ===== */
     .msign{
       box-sizing:border-box; position:relative; display:flex; align-items:center; justify-content:center;
-      width:100%; height:100%; min-height:60px; color:#888; background:#fff; cursor:pointer; text-align:center;
-      transition:border-color .2s ease;
+      width:100%; height:100%; min-height:60px;
+      color:#888; background:#fff; cursor:pointer; text-align:center; transition:border-color .2s ease;
     }
     .msign img{ width:100%; height:100%; object-fit:contain; display:block; }
 
@@ -47,35 +122,28 @@ document.addEventListener('DOMContentLoaded', () => {
     .msign-fullscreen-overlay{
       position:fixed; left:0; top:0; right:0; bottom:0; z-index:99999;
       background:#fff; display:flex; align-items:center; justify-content:center; overflow:hidden;
-      -webkit-user-select:none; user-select:none;
-      /* lock body scroll behind modal, even on iOS */
-      touch-action:none;
+      -webkit-user-select:none; user-select:none; touch-action:none;
     }
 
-    /* ===== Modal =====
-       Phone: true fullscreen using --msign-vh (iOS safe)
-       Desktop: centered card.
-    */
+    /* ===== Modal: iPhone-safe fullscreen grid ===== */
     .msign-modal{
-      width: 100%;
-      height: calc(var(--msign-vh) * 1px); /* REAL viewport height (iOS fix) */
-      display: grid; grid-template-rows: auto 1fr auto; grid-template-columns: 1fr;
+      width:100%;
+      height:calc(var(--msign-vh) * 1px);
+      display:grid; grid-template-rows:auto 1fr auto; grid-template-columns:1fr;
       background:#fff; overflow:hidden;
-      /* safe areas */
-      padding-top: calc(env(safe-area-inset-top, 0px));
-      padding-bottom: calc(env(safe-area-inset-bottom, 0px));
+      padding-top:calc(env(safe-area-inset-top, 0px));
+      padding-bottom:calc(env(safe-area-inset-bottom, 0px));
     }
 
-    /* Desktop upgrade */
-    @media (min-width: 820px){
+    /* Desktop/Tablet upgrade */
+    @media (min-width:820px){
       .msign-fullscreen-overlay{
-        background:rgba(0,0,0,.6);
-        backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+        background:rgba(0,0,0,.6); backdrop-filter:blur(5px); -webkit-backdrop-filter:blur(5px);
       }
       .msign-modal{
-        width: min(800px, 90vw);
-        height: min(600px, calc(var(--msign-vh) * 0.9px));
-        border-radius: 10px; box-shadow: 0 5px 20px rgba(0,0,0,.28);
+        width:min(800px, 90vw);
+        height:min(600px, calc(var(--msign-vh) * 0.9px));
+        border-radius:10px; box-shadow:0 5px 20px rgba(0,0,0,.28);
       }
     }
 
@@ -83,17 +151,15 @@ document.addEventListener('DOMContentLoaded', () => {
       background:#f0f0f0; padding:10px 15px; display:flex; align-items:center;
     }
     .msign-header{ justify-content:space-between; border-bottom:1px solid #ccc; font-weight:600; }
-    .msign-footer{ justify-content:flex-end; border-top:1px solid #ccc; gap:10px; padding: max(10px,12px) 15px; }
+    .msign-footer{ justify-content:flex-end; border-top:1px solid #ccc; gap:10px; padding:max(10px,12px) 15px; }
 
-    .msign-canvas{
-      width:100%; height:100%; min-height:160px; background:#fff; touch-action:none; display:block;
-    }
+    .msign-canvas{ width:100%; height:100%; min-height:160px; background:#fff; touch-action:none; display:block; }
 
     /* ===== Buttons (scoped) ===== */
     .msign-btn{
-      all: unset; box-sizing:border-box; display:inline-flex; align-items:center; justify-content:center;
+      all:unset; box-sizing:border-box; display:inline-flex; align-items:center; justify-content:center;
       padding:10px 16px; min-height:36px; border-radius:6px; border:1px solid #ccc; background:#fff;
-      font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      font: 16px/1.2 -apple-system, system-ui, Segoe UI, Roboto, Arial, sans-serif; /* >=16px to avoid focus zoom */
       color:#111; cursor:pointer; user-select:none; text-decoration:none;
       transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .02s ease;
     }
@@ -123,14 +189,13 @@ document.addEventListener('DOMContentLoaded', () => {
   let activeSignaturePad = null;
   let isDrawing = false, lastX = 0, lastY = 0, activePointerId = null;
 
-  /* ===== iOS-safe viewport height ===== */
+  /* ===== True viewport height variable (works on iOS) ===== */
   function setRealVhVar(){
     const vv = window.visualViewport;
     const h = Math.max(1, Math.round((vv ? vv.height : window.innerHeight)));
     document.documentElement.style.setProperty('--msign-vh', String(h));
   }
   setRealVhVar();
-
   const recalcVhIfOpen = () => {
     setRealVhVar();
     if (overlay.style.display === 'flex') requestAnimationFrame(clearCanvas);
@@ -187,9 +252,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   /* ===== Overlay control ===== */
   function openOverlay(){
-    setRealVhVar();                 // measure *now* (covers iOS URL bar state)
+    // Check per-instance zoom lock override
+    const lock = String(activeSignaturePad?.zoomLock ?? MSIGN_ZOOM_LOCK) !== 'false';
+    if (lock) lockZoom();
+    setRealVhVar();
     overlay.style.display = 'flex';
-    // Wait one frame for layout, then size canvas
     requestAnimationFrame(() => {
       const lw = activeSignaturePad?.lineWidth ?? MSIGN_PEN.defaultWidth;
       setPenWidth(lw); isDrawing=false; activePointerId=null;
@@ -198,6 +265,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   function closeOverlay(){
     overlay.style.display = 'none';
+    unlockZoom();
     isDrawing=false; activePointerId=null; activeSignaturePad=null;
   }
   function saveSignature(e){
@@ -211,7 +279,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   /* ===== Events ===== */
   overlay.addEventListener('contextmenu', e => e.preventDefault());
-
   canvas.addEventListener('pointerdown', beginStroke);
   canvas.addEventListener('pointermove', continueStroke);
   canvas.addEventListener('pointerup', endStroke);
@@ -232,6 +299,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const lwAttr = Number(container.getAttribute('data-line-width'));
     const perInstanceWidth = isNaN(lwAttr) ? undefined : clamp(lwAttr, MSIGN_PEN.min, MSIGN_PEN.max);
+
+    const zoomAttr = container.getAttribute('data-zoom-lock'); // "true"/"false"/null
+    const perInstanceZoomLock = zoomAttr == null ? undefined : (zoomAttr.toLowerCase() !== 'false');
 
     if (container.querySelector('img')) { container.classList.add('msign--signed'); container.style.border='none'; }
     else { applyEmptyVisuals(container); }
@@ -259,9 +329,12 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('Could not find a .msign_output textarea for', container);
         return;
       }
-      activeSignaturePad = { container, output: ta, lineWidth: perInstanceWidth ?? currentPenWidth };
+      activeSignaturePad = {
+        container, output: ta,
+        lineWidth: perInstanceWidth ?? currentPenWidth,
+        zoomLock: perInstanceZoomLock
+      };
       openOverlay();
     });
   });
 });
-
