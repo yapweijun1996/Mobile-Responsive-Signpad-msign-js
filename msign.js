@@ -1,4 +1,12 @@
+
 /**
+ * msign.js v3.8
+ * - Fix zoom issues: grid layout, clamp( , svh/svw , ), visualViewport resize
+ * - Pointer Events; HiDPI canvas; robust reopen
+ * - Auto preview from textarea; dashed border only when empty
+ * - Per-instance data-* controls: placeholder/border/line width
+ */
+ /**
  * msign.js v3.7
  * - Pointer Events; HiDPI canvas; robust reopen
  * - Auto preview from textarea.msign_output
@@ -14,10 +22,10 @@
 document.addEventListener('DOMContentLoaded', () => {
   // ===== Config: pen width =====
   const MSIGN_PEN = { defaultWidth: 2, min: 1, max: 10 };
-  const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
-  let currentPenWidth = clamp(MSIGN_PEN.defaultWidth, MSIGN_PEN.min, MSIGN_PEN.max);
+  const clampNum = (n, min, max) => Math.max(min, Math.min(max, n));
+  let currentPenWidth = clampNum(MSIGN_PEN.defaultWidth, MSIGN_PEN.min, MSIGN_PEN.max);
   function setPenWidth(px) {
-    currentPenWidth = clamp(Number(px) || MSIGN_PEN.defaultWidth, MSIGN_PEN.min, MSIGN_PEN.max);
+    currentPenWidth = clampNum(Number(px) || MSIGN_PEN.defaultWidth, MSIGN_PEN.min, MSIGN_PEN.max);
     if (ctx) ctx.lineWidth = currentPenWidth;
   }
   window.msignSetLineWidth = setPenWidth;
@@ -35,7 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <div class="msign-footer">
           <button class="msign-close-footer msign-btn msign-btn--secondary" type="button">Close</button>
           <button class="msign-clear msign-btn msign-btn--secondary" type="button">Clear</button>
-          <button class="msign-save msign-btn msign-btn--primary" type="button" onclick="clickSaveMSignDelayed();">Save Signature</button>
+          <button class="msign-save msign-btn msign-btn--primary" type="button">Save Signature</button>
         </div>
       </div>
     </div>
@@ -47,36 +55,65 @@ document.addEventListener('DOMContentLoaded', () => {
       position:relative;
       display:flex; align-items:center; justify-content:center;
       width:100%; height:100%; min-height:60px;
-      color:#888; background:#fff; cursor:pointer;
+      color:#888; background:#fff; cursor:pointer; text-align:center;
       transition:border-color .2s ease;
-      text-align:center;
     }
     .msign img{ width:100%; height:100%; object-fit:contain; display:block; }
 
-    /* ===== Overlay / modal ===== */
+    /* ===== Overlay ===== */
     .msign-fullscreen-overlay{
       position:fixed; inset:0; z-index:99999;
       background:#fff; display:flex; align-items:center; justify-content:center;
+      overflow:hidden; /* prevent scroll when zoomed */
       -webkit-user-select:none; user-select:none;
+      contain: layout size style; /* avoid layout leaks from page */
     }
+
+    /* ===== Modal: Grid (header auto / canvas 1fr / footer auto) ===== */
     .msign-modal-content{
-      width:100%; height:100%; background:#fff; display:flex; flex-direction:column;
-      box-shadow:none; border-radius:0; overflow:hidden;
+      /* Fallback sizes (old browsers) */
+      width: 90vw; height: 90vh;
+      max-width: 800px; max-height: 600px;
+
+      /* Modern, zoom-safe clamps */
+      width: clamp(320px, 90svw, 800px);
+      height: clamp(300px, 90svh, 600px);
+
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      grid-template-columns: 1fr;
+      background:#fff; border-radius:8px; box-shadow:0 5px 20px rgba(0,0,0,.3);
+      overflow:hidden;
     }
+
     .msign-header, .msign-footer{
-      flex-shrink:0; background:#f0f0f0; padding:10px 15px; display:flex; align-items:center;
+      background:#f0f0f0; padding:10px 15px; display:flex; align-items:center;
     }
     .msign-header{ justify-content:space-between; border-bottom:1px solid #ccc; font-weight:600; }
     .msign-footer{ justify-content:flex-end; border-top:1px solid #ccc; gap:10px; padding:12px 15px; }
-    .msign-canvas{ flex:1; touch-action:none; background:#fff; }
+
+    /* Canvas must not cover footer/header; let it grow but stay bounded by grid cell */
+    .msign-canvas{
+      width:100%; height:100%;
+      min-height:160px; /* keep some drawing room even at extreme zoom */
+      touch-action:none; background:#fff; display:block;
+    }
+
+    /* Desktop backdrop */
+    @media (min-width:768px){
+      .msign-fullscreen-overlay{
+        background:rgba(0,0,0,.6);
+        backdrop-filter:blur(5px); -webkit-backdrop-filter:blur(5px);
+      }
+    }
 
     /* ===== Buttons (scoped) ===== */
     .msign-btn{
       all: unset;
       box-sizing:border-box;
       display:inline-flex; align-items:center; justify-content:center;
-      padding:10px 16px; min-height:36px;
-      border-radius:6px; border:1px solid #ccc; background:#fff;
+      padding:10px 16px; min-height:36px; border-radius:6px;
+      border:1px solid #ccc; background:#fff;
       font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
       color:#111; cursor:pointer; user-select:none; text-decoration:none;
       transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .02s ease;
@@ -90,14 +127,6 @@ document.addEventListener('DOMContentLoaded', () => {
     .msign-btn--secondary:hover{ background:#5f676e; border-color:#5f676e; }
     .msign-btn--icon{ width:36px; height:36px; padding:0; background:transparent; border:1px solid transparent; color:#333; font-size:22px; line-height:1; }
     .msign-btn--icon:hover{ background:#e9e9e9; border-color:#d0d0d0; }
-
-    @media (min-width:768px){
-      .msign-fullscreen-overlay{ background:rgba(0,0,0,.6); backdrop-filter:blur(5px); -webkit-backdrop-filter:blur(5px); }
-      .msign-modal-content{
-        width:90vw; height:90vh; max-width:800px; max-height:600px;
-        border-radius:8px; box-shadow:0 5px 20px rgba(0,0,0,.3);
-      }
-    }
   `;
   const styleEl = document.createElement('style');
   styleEl.textContent = modalStyle;
@@ -106,6 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ===== Refs =====
   const overlay = document.querySelector('.msign-fullscreen-overlay');
+  const modal   = document.querySelector('.msign-modal-content');
   const canvas  = document.querySelector('.msign-canvas');
   const clearBtn = document.querySelector('.msign-clear');
   const saveBtn  = document.querySelector('.msign-save');
@@ -117,21 +147,35 @@ document.addEventListener('DOMContentLoaded', () => {
   let activeSignaturePad = null;
   let isDrawing = false, lastX = 0, lastY = 0, activePointerId = null;
 
-  // ===== Canvas helpers =====
-  function resizeCanvasVisible() {
-    const rect = canvas.getBoundingClientRect();
+  // ===== Canvas sizing (zoom-safe) =====
+  function sizeCanvasToCSSPixels() {
+    const rect = canvas.getBoundingClientRect();  // CSS pixels (already reflects zoom + grid)
     const dpr = window.devicePixelRatio || 1;
-    canvas.width  = Math.max(1, Math.round(rect.width * dpr));
-    canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    const w = Math.max(1, Math.round(rect.width  * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
     canvas.style.width  = rect.width + 'px';
     canvas.style.height = rect.height + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function paintCanvasBackground() {
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.strokeStyle = '#000';
     ctx.lineCap = 'round';
     setPenWidth(currentPenWidth);
   }
+
+  function clearCanvas() {
+    sizeCanvasToCSSPixels();
+    paintCanvasBackground();
+  }
+
+  // ===== Drawing =====
   const getPos = e => {
     const r = canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
@@ -154,7 +198,6 @@ document.addEventListener('DOMContentLoaded', () => {
     isDrawing = false; try { canvas.releasePointerCapture(e.pointerId); } catch {}
     activePointerId = null;
   }
-  function clearCanvas() { resizeCanvasVisible(); }
 
   // ===== Preview helpers =====
   const isDataImageURL = v =>
@@ -165,43 +208,33 @@ document.addEventListener('DOMContentLoaded', () => {
     img.src = dataUrl;
     container.appendChild(img);
     container.classList.add('msign--signed');
-    // Remove empty-visuals when signed
     container.style.border = 'none';
   }
-  function clearPreview(container) {
-    applyEmptyVisuals(container); // re-apply per-instance empty styles + placeholder
-  }
-
-  // ===== Empty-state visuals (per instance, via data-*) =====
-  function getBoolAttr(el, name, defVal) {
-    const v = el.getAttribute(name);
-    if (v === null) return defVal;
-    return String(v).toLowerCase() !== 'false';
-  }
   function applyEmptyVisuals(container) {
-    const placeholder = container.getAttribute('data-placeholder') || 'Click to Sign';
-    const phVisible  = getBoolAttr(container, 'data-placeholder-visible', true);
-    const borderVisible = getBoolAttr(container, 'data-border-visible', true);
-    const borderStyle = (container.getAttribute('data-border-style') || 'dashed').trim();
-    const borderColor = container.getAttribute('data-border-color') || '#ccc';
-    const borderWidth = Number(container.getAttribute('data-border-width') || '2');
+    const ph   = container.getAttribute('data-placeholder') || 'Click to Sign';
+    const phV  = (container.getAttribute('data-placeholder-visible') ?? 'true').toLowerCase() !== 'false';
+    const bdV  = (container.getAttribute('data-border-visible') ?? 'true').toLowerCase() !== 'false';
+    const bdS  = (container.getAttribute('data-border-style') || 'dashed').trim();
+    const bdC  = container.getAttribute('data-border-color') || '#ccc';
+    const bdW  = Number(container.getAttribute('data-border-width') || '2');
 
     container.classList.remove('msign--signed');
-    container.innerHTML = phVisible ? placeholder : '';
-    if (borderVisible) {
-      container.style.border = `${borderWidth}px ${borderStyle} ${borderColor}`;
-    } else {
-      container.style.border = 'none';
-    }
+    container.innerHTML = phV ? ph : '';
+    container.style.border = bdV ? `${bdW}px ${bdS} ${bdC}` : 'none';
   }
+  function clearPreview(container) { applyEmptyVisuals(container); }
 
   // ===== Overlay control =====
   function openOverlay() {
     overlay.style.display = 'flex';
-    const lw = activeSignaturePad?.lineWidth ?? MSIGN_PEN.defaultWidth;
-    setPenWidth(lw);
-    isDrawing = false; activePointerId = null;
-    requestAnimationFrame(clearCanvas);
+    // Ensure modal fits *current* zoom viewport before sizing canvas
+    // Force a layout pass first, then size canvas
+    requestAnimationFrame(() => {
+      const lw = activeSignaturePad?.lineWidth ?? MSIGN_PEN.defaultWidth;
+      setPenWidth(lw);
+      isDrawing = false; activePointerId = null;
+      clearCanvas();
+    });
   }
   function closeOverlay() {
     overlay.style.display = 'none';
@@ -218,6 +251,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ===== Events =====
   overlay.addEventListener('contextmenu', e => e.preventDefault());
+
   canvas.addEventListener('pointerdown', beginStroke);
   canvas.addEventListener('pointermove', continueStroke);
   canvas.addEventListener('pointerup', endStroke);
@@ -229,39 +263,34 @@ document.addEventListener('DOMContentLoaded', () => {
   closeHeaderBtn.addEventListener('click', e => { e.preventDefault(); closeOverlay(); });
   closeFooterBtn.addEventListener('click', e => { e.preventDefault(); closeOverlay(); });
 
-  window.addEventListener('resize', () => {
+  // Recalculate on viewport/zoom/orientation changes
+  const recalcIfOpen = () => {
     if (overlay.style.display === 'flex') requestAnimationFrame(clearCanvas);
-  });
+  };
+  window.addEventListener('resize', recalcIfOpen);
+  window.addEventListener('orientationchange', recalcIfOpen);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', recalcIfOpen);
+    window.visualViewport.addEventListener('scroll', recalcIfOpen); // some browsers fire scroll on zoom
+  }
 
   // ===== Init fields + auto-preview sync =====
   document.querySelectorAll('.msign').forEach(container => {
-    // Pair with textarea
     const outputTextarea = container.nextElementSibling;
     if (!outputTextarea || !outputTextarea.classList.contains('msign_output')) {
       console.warn('msign: No .msign_output textarea found next to', container);
       return;
     }
-
-    // Per-instance pen width
     const lwAttr = Number(container.getAttribute('data-line-width'));
-    const perInstanceWidth = isNaN(lwAttr) ? undefined : clamp(lwAttr, MSIGN_PEN.min, MSIGN_PEN.max);
+    const perInstanceWidth = isNaN(lwAttr) ? undefined : clampNum(lwAttr, MSIGN_PEN.min, MSIGN_PEN.max);
 
-    // If there is an <img> inside, treat as signed; else apply empty visuals
     const existingImg = container.querySelector('img');
-    if (existingImg) {
-      container.classList.add('msign--signed');
-      container.style.border = 'none';
-    } else {
-      applyEmptyVisuals(container);
-    }
+    if (existingImg) { container.classList.add('msign--signed'); container.style.border = 'none'; }
+    else { applyEmptyVisuals(container); }
 
-    // If textarea already has data URL, render it
     let lastValue = outputTextarea.value;
-    if (isDataImageURL(lastValue)) {
-      renderPreview(container, lastValue);
-    }
+    if (isDataImageURL(lastValue)) renderPreview(container, lastValue);
 
-    // Sync from textarea
     const sync = () => {
       const v = outputTextarea.value;
       if (isDataImageURL(v)) {
@@ -276,7 +305,6 @@ document.addEventListener('DOMContentLoaded', () => {
     outputTextarea.addEventListener('change', sync);
     setInterval(() => { if (outputTextarea.value !== lastValue) sync(); }, 500);
 
-    // Open overlay
     container.addEventListener('click', () => {
       const ta = container.nextElementSibling;
       if (!ta || !ta.classList.contains('msign_output')) {
